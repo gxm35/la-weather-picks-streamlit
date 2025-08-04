@@ -182,8 +182,14 @@ def build_model(df: pd.DataFrame) -> Tuple[LogisticRegression, StandardScaler, p
         "Cos_Day",
     ]
     X = df[feature_cols].shift(1).dropna()
-    y = df["Bucket"].iloc[1:]
-    X, y = X.iloc[1:], y.iloc[1:]
+    # Align the target variable with the predictor matrix by selecting
+    # bucket labels for the same indices retained after shifting.  Using
+    # ``df.loc[X.index]`` ensures that ``X`` and ``y`` have matching
+    # lengths even when rows are dropped due to rolling means or other
+    # NaN values.  This avoids inconsistent sample sizes during model
+    # fitting and preserves the one‑day lag between features and
+    # outcomes.
+    y = df.loc[X.index, "Bucket"]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     model = LogisticRegression(multi_class="multinomial", solver="lbfgs", max_iter=500)
