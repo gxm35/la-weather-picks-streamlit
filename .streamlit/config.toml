@@ -1,0 +1,11 @@
+[theme]
+# Primary accent colour reminiscent of Kalshi green
+primaryColor = "#0A491B"
+# Background color for the main content area
+backgroundColor = "#F7F7F5"
+# Secondary background colour used for sidebar and other accents
+secondaryBackgroundColor = "#E8EDEB"
+# Text colour for most content
+textColor = "#000000"
+# Font used throughout the app; choose a clean sans serif
+font = "sans serif"
