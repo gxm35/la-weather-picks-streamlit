@@ -368,9 +368,12 @@ def fetch_kalshi_odds(
     # Kalshi's API endpoints have changed over time; try multiple base
     # domains to maximise the chance of success.  The list includes the
     # elections subdomain as well as the generic and demo domains.
+    # According to Kalshi support, the public market‑data API for
+    # temperature markets lives under the `api.elections.kalshi.com`
+    # subdomain (not `api.kalshi.com`).  Keep a couple of demo domains as
+    # fallbacks for completeness, but avoid using the wrong subdomain.
     base_v2_options = [
         "https://api.elections.kalshi.com/trade-api/v2",
-        "https://api.kalshi.com/trade-api/v2",
         "https://demo-api.kalshi.com/trade-api/v2",
         "https://demo-api.kalshi.co/trade-api/v2",
     ]
