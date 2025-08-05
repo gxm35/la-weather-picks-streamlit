@@ -338,17 +338,16 @@ def fetch_kalshi_odds(
 ) -> List[Tuple[str, str]]:
     """Fetch current odds for the LA temperature market from Kalshi.
 
-    This function attempts to obtain the mid‑market price for each
-    contract in the "Highest temperature in Los Angeles tomorrow"
-    market (series `KXHIGLAX`).  It first tries to use the public
-    market‑data API (no authentication) to avoid requiring an API key.
-    If that fails or returns no markets, it falls back to the signed
-    trading API using the provided RSA credentials.  When using the
-    public API, each contract's orderbook is queried individually
-    using the ``api.elections.kalshi.com/trade-api/v2`` endpoints and the
-    best bid on the YES side is reported as the mid‑market price (if
-    available).  When using the signed API, the mid‑market price is
-    computed from the best bid and ask.
+    This function attempts to obtain the mid‑market price for each contract
+    in the "Highest temperature in Los Angeles" market (series `KXHIGHLAX`).
+    To accommodate changes in Kalshi's API infrastructure, it first tries
+    multiple public market‑data endpoints (no authentication required).  If
+    none of those return a non‑empty set of markets, it falls back to the
+    signed trading API using the provided RSA credentials.  When using the
+    public API, each contract's orderbook is queried individually and the
+    best YES bid is reported (or derived from the NO bid) as the mid‑market
+    price.  When using the signed API, the mid‑market price is computed
+    from the best bid and ask.
 
     Parameters
     ----------
@@ -365,80 +364,96 @@ def fetch_kalshi_odds(
     """
     odds: List[Tuple[str, str]] = []
     # ------------------------------------------------------------------
-    # Attempt public v2 market‑data API (no authentication required)
-    try:
-        base_v2 = "https://api.elections.kalshi.com/trade-api/v2"
-        # Query open markets for the LA high temperature series
-        # Use the correct ticker "KXHIGHLAX" (note the extra "H" for "HIGH").
-        # The slug on Kalshi's site is "kxhighlax"; using the earlier
-        # mis‑spelled ticker "KXHIGLAX" returns an empty list.
-        markets_url = f"{base_v2}/markets?series_ticker=KXHIGHLAX&status=open"
-        resp = requests.get(markets_url, timeout=10)
-        data = resp.json()
-        markets = data.get("markets", [])
-        for mkt in markets:
-            ticker = mkt.get("ticker", "")
-            # Extract the temperature range from the ticker (e.g. KXHIGLAX73-74)
-            m = re.search(r"(\d{2}-\d{2})$", ticker)
-            if not m:
+    # Attempt public v2 market‑data API (no authentication required).
+    # Kalshi's API endpoints have changed over time; try multiple base
+    # domains to maximise the chance of success.  The list includes the
+    # elections subdomain as well as the generic and demo domains.
+    base_v2_options = [
+        "https://api.elections.kalshi.com/trade-api/v2",
+        "https://api.kalshi.com/trade-api/v2",
+        "https://demo-api.kalshi.com/trade-api/v2",
+        "https://demo-api.kalshi.co/trade-api/v2",
+    ]
+    for base_v2 in base_v2_options:
+        try:
+            markets_url = (
+                f"{base_v2}/markets?series_ticker=KXHIGHLAX&status=open"
+            )
+            resp = requests.get(markets_url, timeout=10)
+            data = resp.json()
+            markets = data.get("markets", [])
+            # If no markets returned, try next base
+            if not markets:
                 continue
-            temp_range = m.group(1)
-            # Fetch orderbook for this market
-            ob_url = f"{base_v2}/markets/{ticker}/orderbook"
-            ob_resp = requests.get(ob_url, timeout=10)
-            ob_data = ob_resp.json().get("orderbook", {})
-            # Use the best YES bid if available, otherwise derive from NO
-            yes_bids = ob_data.get("yes") or []
-            no_bids = ob_data.get("no") or []
-            price: Optional[float] = None
-            if yes_bids and isinstance(yes_bids[0], list) and yes_bids[0]:
-                price = float(yes_bids[0][0])
-            elif no_bids and isinstance(no_bids[0], list) and no_bids[0]:
-                price = 100.0 - float(no_bids[0][0])
-            if price is None:
-                continue
-            odds.append((temp_range, f"{price:.1f}%"))
-        if odds:
-            odds.sort(key=lambda x: int(x[0].split("-")[0]))
-            return odds
-    except Exception:
-        pass
+            for mkt in markets:
+                ticker = mkt.get("ticker", "")
+                m = re.search(r"(\d{2}-\d{2})$", ticker)
+                if not m:
+                    continue
+                temp_range = m.group(1)
+                ob_url = f"{base_v2}/markets/{ticker}/orderbook"
+                ob_resp = requests.get(ob_url, timeout=10)
+                ob_data = ob_resp.json().get("orderbook", {})
+                yes_bids = ob_data.get("yes") or []
+                no_bids = ob_data.get("no") or []
+                price: Optional[float] = None
+                if yes_bids and isinstance(yes_bids[0], list) and yes_bids[0]:
+                    price = float(yes_bids[0][0])
+                elif no_bids and isinstance(no_bids[0], list) and no_bids[0]:
+                    price = 100.0 - float(no_bids[0][0])
+                if price is None:
+                    continue
+                odds.append((temp_range, f"{price:.1f}%"))
+            if odds:
+                odds.sort(key=lambda x: int(x[0].split("-")[0]))
+                return odds
+        except Exception:
+            # ignore errors and try next base URL
+            continue
     # ------------------------------------------------------------------
-    # Fallback to signed trading API if credentials are provided
+    # Fallback to signed trading API if credentials are provided.  Try
+    # multiple base domains in case the primary domain is unreachable.
     if not key_id or not private_key_pem:
         return odds  # may be empty
-    try:
-        import time
-        # Use the corrected ticker in the v0 path as well
-        path = "/v0/markets/KXHIGHLAX/orderbooks"
-        url = f"https://trading-api.kalshi.com{path}"
-        timestamp = str(int(time.time() * 1000))
-        message = timestamp + "GET" + path
-        signature = sign_kalshi_request(private_key_pem, message)
-        headers = {
-            "KALSHI-ACCESS-KEY": key_id,
-            "KALSHI-ACCESS-SIGNATURE": signature,
-            "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        }
-        resp = requests.get(url, headers=headers, timeout=10)
-        data = resp.json()
-        for contract in data.get("orderbooks", []):
-            ticker = contract.get("ticker", "")
-            m = re.search(r"(\d{2}-\d{2})$", ticker)
-            if not m:
-                continue
-            temp_range = m.group(1)
-            bid = contract.get("buy_price")
-            ask = contract.get("sell_price")
-            if bid is None or ask is None:
-                continue
-            mid = (bid + ask) / 2.0
-            odds.append((temp_range, f"{mid:.1f}%"))
-        if odds:
-            odds.sort(key=lambda x: int(x[0].split("-")[0]))
-        return odds
-    except Exception:
-        return odds
+    trading_api_bases = [
+        "https://trading-api.kalshi.com",
+        "https://trading-api.kalshi.co",
+        "https://demo-api.kalshi.com",
+        "https://demo-api.kalshi.co",
+    ]
+    for base in trading_api_bases:
+        try:
+            import time
+            path = "/v0/markets/KXHIGHLAX/orderbooks"
+            url = f"{base}{path}"
+            timestamp = str(int(time.time() * 1000))
+            message = timestamp + "GET" + path
+            signature = sign_kalshi_request(private_key_pem, message)
+            headers = {
+                "KALSHI-ACCESS-KEY": key_id,
+                "KALSHI-ACCESS-SIGNATURE": signature,
+                "KALSHI-ACCESS-TIMESTAMP": timestamp,
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            data = resp.json()
+            for contract in data.get("orderbooks", []):
+                ticker = contract.get("ticker", "")
+                m = re.search(r"(\d{2}-\d{2})$", ticker)
+                if not m:
+                    continue
+                temp_range = m.group(1)
+                bid = contract.get("buy_price")
+                ask = contract.get("sell_price")
+                if bid is None or ask is None:
+                    continue
+                mid = (bid + ask) / 2.0
+                odds.append((temp_range, f"{mid:.1f}%"))
+            if odds:
+                odds.sort(key=lambda x: int(x[0].split("-")[0]))
+                return odds
+        except Exception:
+            continue
+    return odds
 
 
 def display_kalshi_odds(odds: Sequence[Tuple[str, str]]) -> None:
