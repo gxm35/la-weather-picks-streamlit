@@ -399,8 +399,13 @@ def display_kalshi_odds(odds: Sequence[Tuple[str, str]]) -> None:
         probability (as a string with percentage).
     """
     if not odds:
+        # Inform the user about missing secrets when odds cannot be fetched.
+        # The app now uses Kalshi's signed authentication scheme which
+        # requires both the Key ID and the RSA private key.  If either
+        # ``KALSHI_KEY_ID`` or ``KALSHI_PRIVATE_KEY`` is missing from
+        # Streamlit secrets, ``fetch_kalshi_odds`` will return an empty list.
         st.info(
-            "Kalshi odds unavailable.  Set the KALSHI_API_KEY secret to display live market data."
+            "Kalshi odds unavailable.  Set both `KALSHI_KEY_ID` and `KALSHI_PRIVATE_KEY` secrets in Streamlit to display live market data."
         )
         return
     st.markdown("### Live Kalshi Market Odds")
