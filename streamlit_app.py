@@ -293,20 +293,55 @@ def predict_next_day(
     return sorted(zip(labels, preds), key=lambda x: -x[1])[:3]
 
 
-def fetch_kalshi_odds(api_key: Optional[str]) -> List[Tuple[str, str]]:
-    """Fetch current odds for the LA temperature market from Kalshi.
+def sign_kalshi_request(private_key_pem: str, message: str) -> str:
+    """Sign a Kalshi API request string using RSA PSS and return base64.
 
-    If an API key is provided, this function queries the orderbook for the
-    KXHIGLAX market and computes a mid‑price between the best bid and
-    ask for each contract.  The ticker contains the temperature range as
-    its suffix (e.g. '72-73').  The resulting list is sorted by the
-    numeric starting temperature.
+    The Kalshi trading API requires that each request include a
+    signature computed over the timestamp, HTTP method and request path.
+    This helper loads the RSA private key and returns a base64‑encoded
+    signature of the provided message.  Any errors loading the key
+    propagate to the caller.
 
     Parameters
     ----------
-    api_key : Optional[str]
-        A personal access token for Kalshi's trading API.  If not
-        provided, the function returns an empty list.
+    private_key_pem : str
+        The RSA private key in PEM format.  This should include the
+        BEGIN/END delimiters.
+    message : str
+        The message to sign (timestamp + method + path).
+
+    Returns
+    -------
+    str
+        Base64‑encoded signature.
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    import base64
+
+    private_key = serialization.load_pem_private_key(
+        private_key_pem.encode("utf-8"), password=None
+    )
+    signature = private_key.sign(
+        message.encode("utf-8"),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+    return base64.b64encode(signature).decode("utf-8")
+
+
+def fetch_kalshi_odds(key_id: Optional[str], private_key_pem: Optional[str]) -> List[Tuple[str, str]]:
+    """Fetch current odds for the LA temperature market from Kalshi.
+
+    This version uses Kalshi's signed authentication scheme.  It
+    constructs a signature from the current timestamp, HTTP method and
+    request path using the provided RSA private key.  The key ID,
+    signature and timestamp are included in the request headers.  If
+    either the key ID or private key is missing, this function
+    immediately returns an empty list.
 
     Returns
     -------
@@ -314,18 +349,30 @@ def fetch_kalshi_odds(api_key: Optional[str]) -> List[Tuple[str, str]]:
         Each tuple contains a temperature range string and its mid‑market
         probability formatted as a percentage (e.g., ('72-73', '23.5%')).
     """
-    if not api_key:
+    # If credentials are not provided, skip fetching odds
+    if not key_id or not private_key_pem:
         return []
-    url = "https://trading-api.kalshi.com/v0/markets/KXHIGLAX/orderbooks"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    import time
+    # API endpoint details
+    path = "/v0/markets/KXHIGLAX/orderbooks"
+    url = f"https://trading-api.kalshi.com{path}"
+    timestamp = str(int(time.time() * 1000))
+    message = timestamp + "GET" + path
+    try:
+        signature = sign_kalshi_request(private_key_pem, message)
+    except Exception:
+        return []
+    headers = {
+        "KALSHI-ACCESS-KEY": key_id,
+        "KALSHI-ACCESS-SIGNATURE": signature,
+        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
         odds: List[Tuple[str, str]] = []
         for contract in data.get("orderbooks", []):
             ticker = contract.get("ticker", "")
-            # Extract the temperature range from the ticker suffix.  The
-            # ticker pattern ends with the range, e.g. 'KXHIGLAX72-73'.
             m = re.search(r"(\d{2}-\d{2})$", ticker)
             if not m:
                 continue
@@ -336,7 +383,6 @@ def fetch_kalshi_odds(api_key: Optional[str]) -> List[Tuple[str, str]]:
                 continue
             mid = (bid + ask) / 2.0
             odds.append((temp_range, f"{mid:.1f}%"))
-        # Sort by starting temperature to order ascending
         odds.sort(key=lambda x: int(x[0].split("-")[0]))
         return odds
     except Exception:
@@ -443,10 +489,13 @@ def main() -> None:
         best_bucket = top_preds[0][0]
         st.success(f"**Model pick:** {best_bucket}")
     with col2:
-        # Display Kalshi odds
-        # Get API key from Streamlit secrets or environment variables
-        kalshi_api_key = st.secrets.get("KALSHI_API_KEY", os.getenv("KALSHI_API_KEY"))
-        odds = fetch_kalshi_odds(kalshi_api_key)
+        # Display Kalshi odds using signed authentication.  We expect two
+        # secrets to be defined in Streamlit Cloud: ``KALSHI_KEY_ID`` and
+        # ``KALSHI_PRIVATE_KEY``.  If either is missing, ``fetch_kalshi_odds``
+        # will return an empty list and the UI will prompt the user.
+        kalshi_key_id = st.secrets.get("KALSHI_KEY_ID")
+        kalshi_private_key = st.secrets.get("KALSHI_PRIVATE_KEY")
+        odds = fetch_kalshi_odds(kalshi_key_id, kalshi_private_key)
         display_kalshi_odds(odds)
     st.caption(
         "Model predictions are estimates based on historical and forecast data. "
