@@ -369,7 +369,10 @@ def fetch_kalshi_odds(
     try:
         base_v2 = "https://api.elections.kalshi.com/trade-api/v2"
         # Query open markets for the LA high temperature series
-        markets_url = f"{base_v2}/markets?series_ticker=KXHIGLAX&status=open"
+        # Use the correct ticker "KXHIGHLAX" (note the extra "H" for "HIGH").
+        # The slug on Kalshi's site is "kxhighlax"; using the earlier
+        # mis‑spelled ticker "KXHIGLAX" returns an empty list.
+        markets_url = f"{base_v2}/markets?series_ticker=KXHIGHLAX&status=open"
         resp = requests.get(markets_url, timeout=10)
         data = resp.json()
         markets = data.get("markets", [])
@@ -406,7 +409,8 @@ def fetch_kalshi_odds(
         return odds  # may be empty
     try:
         import time
-        path = "/v0/markets/KXHIGLAX/orderbooks"
+        # Use the corrected ticker in the v0 path as well
+        path = "/v0/markets/KXHIGHLAX/orderbooks"
         url = f"https://trading-api.kalshi.com{path}"
         timestamp = str(int(time.time() * 1000))
         message = timestamp + "GET" + path
