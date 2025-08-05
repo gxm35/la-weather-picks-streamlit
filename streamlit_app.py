@@ -333,15 +333,29 @@ def sign_kalshi_request(private_key_pem: str, message: str) -> str:
     return base64.b64encode(signature).decode("utf-8")
 
 
-def fetch_kalshi_odds(key_id: Optional[str], private_key_pem: Optional[str]) -> List[Tuple[str, str]]:
+def fetch_kalshi_odds(
+    key_id: Optional[str], private_key_pem: Optional[str]
+) -> List[Tuple[str, str]]:
     """Fetch current odds for the LA temperature market from Kalshi.
 
-    This version uses Kalshi's signed authentication scheme.  It
-    constructs a signature from the current timestamp, HTTP method and
-    request path using the provided RSA private key.  The key ID,
-    signature and timestamp are included in the request headers.  If
-    either the key ID or private key is missing, this function
-    immediately returns an empty list.
+    This function attempts to obtain the mid‑market price for each
+    contract in the "Highest temperature in Los Angeles tomorrow"
+    market (series `KXHIGLAX`).  It first tries to use the public
+    market‑data API (no authentication) to avoid requiring an API key.
+    If that fails or returns no markets, it falls back to the signed
+    trading API using the provided RSA credentials.  When using the
+    public API, each contract's orderbook is queried individually
+    using the ``api.elections.kalshi.com/trade-api/v2`` endpoints and the
+    best bid on the YES side is reported as the mid‑market price (if
+    available).  When using the signed API, the mid‑market price is
+    computed from the best bid and ask.
+
+    Parameters
+    ----------
+    key_id : str or None
+        The Kalshi API key ID for signed requests.  May be None.
+    private_key_pem : str or None
+        The RSA private key in PEM format.  May be None.
 
     Returns
     -------
@@ -349,28 +363,61 @@ def fetch_kalshi_odds(key_id: Optional[str], private_key_pem: Optional[str]) -> 
         Each tuple contains a temperature range string and its mid‑market
         probability formatted as a percentage (e.g., ('72-73', '23.5%')).
     """
-    # If credentials are not provided, skip fetching odds
-    if not key_id or not private_key_pem:
-        return []
-    import time
-    # API endpoint details
-    path = "/v0/markets/KXHIGLAX/orderbooks"
-    url = f"https://trading-api.kalshi.com{path}"
-    timestamp = str(int(time.time() * 1000))
-    message = timestamp + "GET" + path
+    odds: List[Tuple[str, str]] = []
+    # ------------------------------------------------------------------
+    # Attempt public v2 market‑data API (no authentication required)
     try:
-        signature = sign_kalshi_request(private_key_pem, message)
+        base_v2 = "https://api.elections.kalshi.com/trade-api/v2"
+        # Query open markets for the LA high temperature series
+        markets_url = f"{base_v2}/markets?series_ticker=KXHIGLAX&status=open"
+        resp = requests.get(markets_url, timeout=10)
+        data = resp.json()
+        markets = data.get("markets", [])
+        for mkt in markets:
+            ticker = mkt.get("ticker", "")
+            # Extract the temperature range from the ticker (e.g. KXHIGLAX73-74)
+            m = re.search(r"(\d{2}-\d{2})$", ticker)
+            if not m:
+                continue
+            temp_range = m.group(1)
+            # Fetch orderbook for this market
+            ob_url = f"{base_v2}/markets/{ticker}/orderbook"
+            ob_resp = requests.get(ob_url, timeout=10)
+            ob_data = ob_resp.json().get("orderbook", {})
+            # Use the best YES bid if available, otherwise derive from NO
+            yes_bids = ob_data.get("yes") or []
+            no_bids = ob_data.get("no") or []
+            price: Optional[float] = None
+            if yes_bids and isinstance(yes_bids[0], list) and yes_bids[0]:
+                price = float(yes_bids[0][0])
+            elif no_bids and isinstance(no_bids[0], list) and no_bids[0]:
+                price = 100.0 - float(no_bids[0][0])
+            if price is None:
+                continue
+            odds.append((temp_range, f"{price:.1f}%"))
+        if odds:
+            odds.sort(key=lambda x: int(x[0].split("-")[0]))
+            return odds
     except Exception:
-        return []
-    headers = {
-        "KALSHI-ACCESS-KEY": key_id,
-        "KALSHI-ACCESS-SIGNATURE": signature,
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    }
+        pass
+    # ------------------------------------------------------------------
+    # Fallback to signed trading API if credentials are provided
+    if not key_id or not private_key_pem:
+        return odds  # may be empty
     try:
+        import time
+        path = "/v0/markets/KXHIGLAX/orderbooks"
+        url = f"https://trading-api.kalshi.com{path}"
+        timestamp = str(int(time.time() * 1000))
+        message = timestamp + "GET" + path
+        signature = sign_kalshi_request(private_key_pem, message)
+        headers = {
+            "KALSHI-ACCESS-KEY": key_id,
+            "KALSHI-ACCESS-SIGNATURE": signature,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp,
+        }
         resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
-        odds: List[Tuple[str, str]] = []
         for contract in data.get("orderbooks", []):
             ticker = contract.get("ticker", "")
             m = re.search(r"(\d{2}-\d{2})$", ticker)
@@ -383,10 +430,11 @@ def fetch_kalshi_odds(key_id: Optional[str], private_key_pem: Optional[str]) -> 
                 continue
             mid = (bid + ask) / 2.0
             odds.append((temp_range, f"{mid:.1f}%"))
-        odds.sort(key=lambda x: int(x[0].split("-")[0]))
+        if odds:
+            odds.sort(key=lambda x: int(x[0].split("-")[0]))
         return odds
     except Exception:
-        return []
+        return odds
 
 
 def display_kalshi_odds(odds: Sequence[Tuple[str, str]]) -> None:
